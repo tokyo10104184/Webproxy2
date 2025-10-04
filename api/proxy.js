@@ -66,13 +66,16 @@ const rewriteHtml = (htmlBuffer, finalUrl) => {
 // メインのリクエスト処理関数
 const handleRequest = async (req, res) => {
     let targetUrl;
-    let requestData;
     const method = req.method.toUpperCase();
 
     if (method === 'POST') {
         const { proxy_target_url, ...postData } = req.body || {};
         targetUrl = proxy_target_url;
-        requestData = new URLSearchParams(postData).toString();
+        // POSTデータをクエリ文字列に変換
+        const postParams = new URLSearchParams(postData).toString();
+        if (postParams) {
+            targetUrl += `?${postParams}`;
+        }
     } else { // GET
         const { proxy_target_url, ...getData } = req.query || {};
         if (proxy_target_url) {
@@ -90,58 +93,29 @@ const handleRequest = async (req, res) => {
         return res.status(400).send('URL is required');
     }
 
-    // --- ヘッダー転送ロジック ---
-    // 外部サイトへのリクエストに含めるヘッダーを準備する
+    // --- Google翻訳プロキシロジック ---
+    // ターゲットURLをGoogle翻訳のURLに埋め込み、IPブロックを回避する
+    const googleTranslateProxyUrl = `https://translate.google.com/translate?sl=auto&tl=en&u=${encodeURIComponent(targetUrl)}`;
+    // ---
+
     const forwardedHeaders = {
-        // ユーザーのUser-Agentを優先し、なければiPadにフォールバック
-        'user-agent': req.headers['user-agent'] || 'Mozilla/5.0 (iPad; CPU OS 13_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.1.1 Mobile/15E148 Safari/604.1',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
     };
-
-    // 転送するヘッダーのリスト（セキュリティ上、ホスト関連などは除外）
-    const headersToForward = [
-        'accept',
-        'accept-language',
-        'accept-encoding',
-        'x-forwarded-for', // VercelがユーザーのIPをここに設定する
-        'cookie',          // セッション維持のためにCookieを転送
-    ];
-
-    headersToForward.forEach(headerName => {
-        if (req.headers[headerName]) {
-            forwardedHeaders[headerName] = req.headers[headerName];
-        }
-    });
-
-    // リファラーをターゲットのオリジンに設定
-    try {
-        forwardedHeaders['referer'] = new URL(targetUrl).origin;
-    } catch (e) {
-        console.warn(`Could not set referer for invalid URL: ${targetUrl}`);
-    }
-    // --- ヘッダー転送ロジックここまで ---
 
     try {
         const axiosConfig = {
-            method,
-            url: targetUrl,
-            headers: forwardedHeaders, // 準備したヘッダーを使用
-            data: requestData,
+            method: 'GET', // Google翻訳へは常にGETでリクエスト
+            url: googleTranslateProxyUrl, // Google翻訳のURLを使用
+            headers: forwardedHeaders,
             responseType: 'arraybuffer',
             maxRedirects: 5,
-            decompress: true, // 圧縮されたレスポンスを自動で展開
         };
-        if (method === 'POST') {
-            axiosConfig.headers['Content-Type'] = 'application/x-www-form-urlencoded';
-        }
 
         const axiosResponse = await axios(axiosConfig);
-        const finalUrl = new URL(axiosResponse.request.res.responseUrl || targetUrl);
+        // Google翻訳から返されたHTMLは、元のサイトのURLを基準に処理する必要がある
+        const finalUrl = new URL(targetUrl);
         const contentType = axiosResponse.headers['content-type'] || '';
 
-        // 外部サイトからのSet-Cookieヘッダーをユーザーのブラウザに転送
-        if (axiosResponse.headers['set-cookie']) {
-            res.setHeader('Set-Cookie', axiosResponse.headers['set-cookie']);
-        }
         res.setHeader('Content-Type', contentType);
 
         if (contentType.includes('text/html')) {
