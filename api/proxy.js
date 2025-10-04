@@ -1,11 +1,23 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
-const { URL } = require('url'); // Node.jsの標準モジュールURLをインポート
+const { URL } = require('url');
 
-// Vercelの標準的なサーバーレス関数の形式
-// module.exports = (request, response) => { ... }
+// URLを解決するためのヘルパー関数
+// 相対パスを絶対パスに変換する
+const resolveUrl = (path, base) => {
+    // スキームを持つURL（http, https, data:など）やプロトコル相対URL(//)はそのまま返す
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(path) || path.startsWith('//')) {
+        return path;
+    }
+    try {
+        return new URL(path, base).href;
+    } catch (e) {
+        console.warn(`Could not resolve URL: ${path} with base: ${base}`);
+        return path; // 解決に失敗した場合は元のパスを返す
+    }
+};
+
 module.exports = async (req, res) => {
-    // Vercelでは、クエリパラメータは req.query にあります
     let { url } = req.query;
 
     if (!url) {
@@ -13,67 +25,65 @@ module.exports = async (req, res) => {
         return;
     }
 
-    // URLにプロトコルが含まれていない場合、http:// を追加
     if (!/^https?:\/\//i.test(url)) {
         url = 'http://' + url;
     }
 
     try {
-        // iPadのUser-Agent
         const ipadUserAgent = 'Mozilla/5.0 (iPad; CPU OS 13_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.1.1 Mobile/15E148 Safari/604.1';
 
         const axiosResponse = await axios.get(url, {
-            headers: {
-                'User-Agent': ipadUserAgent,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Referer': new URL(url).origin // リファラーをオリジンに設定
-            },
+            headers: { 'User-Agent': ipadUserAgent },
             responseType: 'text',
-            maxRedirects: 5
+            maxRedirects: 5,
         });
 
-        // CheerioでHTMLをパース
         const $ = cheerio.load(axiosResponse.data);
-        // リダイレクトを考慮した最終的なページのURLを取得
         const finalUrl = new URL(axiosResponse.request.res.responseUrl || url);
-        const baseUrl = finalUrl.origin;
 
-        // <base>タグを設定して相対パスを解決
-        $('head').prepend(`<base href="${baseUrl}">`);
+        // 問題の原因だった<base>タグは使用しない
 
-        // すべてのリンク(<a>タグ)をプロキシ経由に書き換える
-        $('a').each((i, elem) => {
-            const href = $(elem).attr('href');
-            // href属性があり、JavaScriptやアンカーリンクでない場合のみ処理
-            if (href && !href.startsWith('javascript:') && !href.startsWith('#')) {
-                try {
-                    // 相対パスを絶対パスに変換
-                    const absoluteUrl = new URL(href, finalUrl.href).href;
-                    // プロキシ用のURLに書き換え
-                    $(elem).attr('href', `/api/proxy?url=${encodeURIComponent(absoluteUrl)}`);
-                } catch (e) {
-                    console.warn(`Skipping invalid URL in <a> tag: ${href}`);
+        // ページ遷移のためのリンクをプロキシ経由に書き換える
+        ['a', 'form'].forEach(tagName => {
+            const attr = tagName === 'a' ? 'href' : 'action';
+            $(tagName).each((i, elem) => {
+                const originalUrl = $(elem).attr(attr);
+                if (originalUrl && !originalUrl.startsWith('javascript:') && !originalUrl.startsWith('#')) {
+                    const absoluteUrl = resolveUrl(originalUrl, finalUrl.href);
+                    $(elem).attr(attr, `/api/proxy?url=${encodeURIComponent(absoluteUrl)}`);
                 }
+            });
+        });
+
+        // 画像、スクリプト、CSSなどのアセットのURLを絶対パスに書き換える
+        ['img', 'script', 'link'].forEach(tagName => {
+            const attr = (tagName === 'link') ? 'href' : 'src';
+            $(tagName).each((i, elem) => {
+                const originalUrl = $(elem).attr(attr);
+                if (originalUrl) {
+                    // プロトコル相対URL(//)を現在のページのプロトコルに合わせる
+                    const resolved = originalUrl.startsWith('//') ? `${finalUrl.protocol}${originalUrl}` : resolveUrl(originalUrl, finalUrl.href);
+                    $(elem).attr(attr, resolved);
+                }
+            });
+        });
+
+        // srcset属性（レスポンシブ画像）も絶対パスに書き換える
+        $('source, img').each((i, elem) => {
+            const srcset = $(elem).attr('srcset');
+            if (srcset) {
+                const newSrcset = srcset
+                    .split(',')
+                    .map(part => {
+                        const [url, descriptor] = part.trim().split(/\s+/);
+                        const absoluteUrl = url.startsWith('//') ? `${finalUrl.protocol}${url}` : resolveUrl(url, finalUrl.href);
+                        return `${absoluteUrl} ${descriptor || ''}`.trim();
+                    })
+                    .join(', ');
+                $(elem).attr('srcset', newSrcset);
             }
         });
 
-        // すべてのフォーム(<form>タグ)の送信先もプロキシ経由に書き換える
-        $('form').each((i, elem) => {
-            const action = $(elem).attr('action');
-            if (action) {
-                try {
-                    // 相対パスを絶対パスに変換
-                    const absoluteUrl = new URL(action, finalUrl.href).href;
-                    // プロキシ用のURLに書き換え
-                    $(elem).attr('action', `/api/proxy?url=${encodeURIComponent(absoluteUrl)}`);
-                } catch (e) {
-                    console.warn(`Skipping invalid URL in <form> action: ${action}`);
-                }
-            }
-        });
-
-        // 変更したHTMLを送信
         res.status(200).send($.html());
     } catch (error) {
         console.error('Error fetching the URL:', error.message);
