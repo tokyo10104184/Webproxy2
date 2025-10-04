@@ -35,10 +35,43 @@ module.exports = async (req, res) => {
 
         // CheerioでHTMLをパース
         const $ = cheerio.load(axiosResponse.data);
-        const baseUrl = new URL(axiosResponse.request.res.responseUrl || url).origin;
+        // リダイレクトを考慮した最終的なページのURLを取得
+        const finalUrl = new URL(axiosResponse.request.res.responseUrl || url);
+        const baseUrl = finalUrl.origin;
 
         // <base>タグを設定して相対パスを解決
         $('head').prepend(`<base href="${baseUrl}">`);
+
+        // すべてのリンク(<a>タグ)をプロキシ経由に書き換える
+        $('a').each((i, elem) => {
+            const href = $(elem).attr('href');
+            // href属性があり、JavaScriptやアンカーリンクでない場合のみ処理
+            if (href && !href.startsWith('javascript:') && !href.startsWith('#')) {
+                try {
+                    // 相対パスを絶対パスに変換
+                    const absoluteUrl = new URL(href, finalUrl.href).href;
+                    // プロキシ用のURLに書き換え
+                    $(elem).attr('href', `/api/proxy?url=${encodeURIComponent(absoluteUrl)}`);
+                } catch (e) {
+                    console.warn(`Skipping invalid URL in <a> tag: ${href}`);
+                }
+            }
+        });
+
+        // すべてのフォーム(<form>タグ)の送信先もプロキシ経由に書き換える
+        $('form').each((i, elem) => {
+            const action = $(elem).attr('action');
+            if (action) {
+                try {
+                    // 相対パスを絶対パスに変換
+                    const absoluteUrl = new URL(action, finalUrl.href).href;
+                    // プロキシ用のURLに書き換え
+                    $(elem).attr('action', `/api/proxy?url=${encodeURIComponent(absoluteUrl)}`);
+                } catch (e) {
+                    console.warn(`Skipping invalid URL in <form> action: ${action}`);
+                }
+            }
+        });
 
         // 変更したHTMLを送信
         res.status(200).send($.html());
