@@ -6,8 +6,9 @@ const app = express();
 // The 'public' directory is served automatically by Vercel at the root.
 // The express.static middleware is not needed in the serverless function.
 
-// プロキシエンドポイント
-app.get('/proxy', async (req, res) => {
+// Vercelは `api/proxy.js` を `/api/proxy` エンドポイントにマッピングします。
+// そのため、このExpressアプリは、そのエンドポイントのルート(`/`)へのリクエストを処理する必要があります。
+app.get('/', async (req, res) => {
     let { url } = req.query;
 
     if (!url) {
