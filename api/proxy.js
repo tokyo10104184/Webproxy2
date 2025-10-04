@@ -1,4 +1,5 @@
-const axios = require('axios');
+const playwright = require('playwright-core');
+const chromium = require('@sparticuz/chromium');
 const cheerio = require('cheerio');
 const { URL, URLSearchParams } = require('url');
 
@@ -16,8 +17,8 @@ const resolveUrl = (path, base) => {
 };
 
 // HTMLを処理し、URLを書き換える関数
-const rewriteHtml = (htmlBuffer, finalUrl) => {
-    const $ = cheerio.load(htmlBuffer.toString('utf-8'));
+const rewriteHtml = (htmlString, finalUrl) => {
+    const $ = cheerio.load(htmlString);
 
     // ページ遷移のためのリンクをプロキシ経由に書き換える
     $('a[href]').each((i, elem) => {
@@ -32,7 +33,7 @@ const rewriteHtml = (htmlBuffer, finalUrl) => {
     $('form').each((i, elem) => {
         const action = $(elem).attr('action') || '';
         const absoluteAction = resolveUrl(action, finalUrl.href);
-        $(elem).attr('action', '/api/proxy'); // すべてのフォームはプロキシに送信
+        $(elem).attr('action', '/api/proxy');
         $(elem).prepend(`<input type="hidden" name="proxy_target_url" value="${absoluteAction}">`);
     });
 
@@ -48,7 +49,7 @@ const rewriteHtml = (htmlBuffer, finalUrl) => {
         });
     });
 
-    // srcset属性（レスポンシブ画像）も絶対パスに書き換える
+    // srcset属性も絶対パスに
     $('source, img').each((i, elem) => {
         const srcset = $(elem).attr('srcset');
         if (srcset) {
@@ -63,98 +64,65 @@ const rewriteHtml = (htmlBuffer, finalUrl) => {
     return $.html();
 };
 
+
 // メインのリクエスト処理関数
 const handleRequest = async (req, res) => {
     let targetUrl;
-    let requestData;
     const method = req.method.toUpperCase();
 
     if (method === 'POST') {
         const { proxy_target_url, ...postData } = req.body || {};
         targetUrl = proxy_target_url;
-        requestData = new URLSearchParams(postData).toString();
-    } else { // GET
-        const { proxy_target_url, ...getData } = req.query || {};
-        if (proxy_target_url) {
-            targetUrl = proxy_target_url;
-            const searchParams = new URLSearchParams(getData);
-            if (searchParams.toString()) {
-                targetUrl += `?${searchParams.toString()}`;
-            }
-        } else {
-            targetUrl = req.query.url;
+        const postParams = new URLSearchParams(postData).toString();
+        if (postParams) {
+            targetUrl += `?${postParams}`;
         }
+    } else {
+        targetUrl = req.query.url;
     }
 
     if (!targetUrl) {
         return res.status(400).send('URL is required');
     }
 
-    // --- ヘッダー転送ロジック ---
-    // 外部サイトへのリクエストに含めるヘッダーを準備する
-    const forwardedHeaders = {
-        // ユーザーのUser-Agentを優先し、なければiPadにフォールバック
-        'user-agent': req.headers['user-agent'] || 'Mozilla/5.0 (iPad; CPU OS 13_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.1.1 Mobile/15E148 Safari/604.1',
-    };
-
-    // 転送するヘッダーのリスト（セキュリティ上、ホスト関連などは除外）
-    const headersToForward = [
-        'accept',
-        'accept-language',
-        'accept-encoding',
-        'x-forwarded-for', // VercelがユーザーのIPをここに設定する
-        'cookie',          // セッション維持のためにCookieを転送
-    ];
-
-    headersToForward.forEach(headerName => {
-        if (req.headers[headerName]) {
-            forwardedHeaders[headerName] = req.headers[headerName];
-        }
-    });
-
-    // リファラーをターゲットのオリジンに設定
+    let browser = null;
     try {
-        forwardedHeaders['referer'] = new URL(targetUrl).origin;
-    } catch (e) {
-        console.warn(`Could not set referer for invalid URL: ${targetUrl}`);
-    }
-    // --- ヘッダー転送ロジックここまで ---
+        // Vercel環境でChromiumを起動
+        browser = await playwright.chromium.launch({
+            args: chromium.args,
+            executablePath: await chromium.executablePath(),
+            headless: chromium.headless,
+        });
 
-    try {
-        const axiosConfig = {
-            method,
-            url: targetUrl,
-            headers: forwardedHeaders, // 準備したヘッダーを使用
-            data: requestData,
-            responseType: 'arraybuffer',
-            maxRedirects: 5,
-            decompress: true, // 圧縮されたレスポンスを自動で展開
-        };
-        if (method === 'POST') {
-            axiosConfig.headers['Content-Type'] = 'application/x-www-form-urlencoded';
-        }
+        const context = await browser.newContext({
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+        });
+        const page = await context.newPage();
 
-        const axiosResponse = await axios(axiosConfig);
-        const finalUrl = new URL(axiosResponse.request.res.responseUrl || targetUrl);
-        const contentType = axiosResponse.headers['content-type'] || '';
+        const response = await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+        const html = await page.content();
 
-        // 外部サイトからのSet-Cookieヘッダーをユーザーのブラウザに転送
-        if (axiosResponse.headers['set-cookie']) {
-            res.setHeader('Set-Cookie', axiosResponse.headers['set-cookie']);
-        }
+        const finalUrl = new URL(page.url());
+        const contentType = response.headers()['content-type'] || 'text/html';
+
         res.setHeader('Content-Type', contentType);
 
         if (contentType.includes('text/html')) {
-            const rewrittenHtml = rewriteHtml(axiosResponse.data, finalUrl);
+            const rewrittenHtml = rewriteHtml(html, finalUrl);
             res.status(200).send(rewrittenHtml);
         } else {
-            res.status(200).send(axiosResponse.data);
+            // HTML以外はそのまま返す (将来的には対応が必要)
+            const buffer = await response.body();
+            res.status(200).send(buffer);
         }
+
     } catch (error) {
-        console.error('Proxy Error:', error.response ? `Status: ${error.response.status}` : error.message);
-        const statusCode = error.response ? error.response.status : 500;
-        const statusText = error.response ? error.response.statusText : 'Internal Server Error';
-        res.status(statusCode).send(`Error fetching the URL: ${statusText}`);
+        console.error('Proxy Error:', error.message);
+        res.status(500).send(`Error fetching the URL with Playwright: ${error.message}`);
+    } finally {
+        if (browser) {
+            await browser.close();
+        }
     }
 };
 
