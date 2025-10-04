@@ -90,15 +90,45 @@ const handleRequest = async (req, res) => {
         return res.status(400).send('URL is required');
     }
 
+    // --- ヘッダー転送ロジック ---
+    // 外部サイトへのリクエストに含めるヘッダーを準備する
+    const forwardedHeaders = {
+        // ユーザーのUser-Agentを優先し、なければiPadにフォールバック
+        'user-agent': req.headers['user-agent'] || 'Mozilla/5.0 (iPad; CPU OS 13_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.1.1 Mobile/15E148 Safari/604.1',
+    };
+
+    // 転送するヘッダーのリスト（セキュリティ上、ホスト関連などは除外）
+    const headersToForward = [
+        'accept',
+        'accept-language',
+        'accept-encoding',
+        'x-forwarded-for', // VercelがユーザーのIPをここに設定する
+        'cookie',          // セッション維持のためにCookieを転送
+    ];
+
+    headersToForward.forEach(headerName => {
+        if (req.headers[headerName]) {
+            forwardedHeaders[headerName] = req.headers[headerName];
+        }
+    });
+
+    // リファラーをターゲットのオリジンに設定
     try {
-        const ipadUserAgent = 'Mozilla/5.0 (iPad; CPU OS 13_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.1.1 Mobile/15E148 Safari/604.1';
+        forwardedHeaders['referer'] = new URL(targetUrl).origin;
+    } catch (e) {
+        console.warn(`Could not set referer for invalid URL: ${targetUrl}`);
+    }
+    // --- ヘッダー転送ロジックここまで ---
+
+    try {
         const axiosConfig = {
             method,
             url: targetUrl,
-            headers: { 'User-Agent': ipadUserAgent },
+            headers: forwardedHeaders, // 準備したヘッダーを使用
             data: requestData,
             responseType: 'arraybuffer',
             maxRedirects: 5,
+            decompress: true, // 圧縮されたレスポンスを自動で展開
         };
         if (method === 'POST') {
             axiosConfig.headers['Content-Type'] = 'application/x-www-form-urlencoded';
@@ -108,6 +138,10 @@ const handleRequest = async (req, res) => {
         const finalUrl = new URL(axiosResponse.request.res.responseUrl || targetUrl);
         const contentType = axiosResponse.headers['content-type'] || '';
 
+        // 外部サイトからのSet-Cookieヘッダーをユーザーのブラウザに転送
+        if (axiosResponse.headers['set-cookie']) {
+            res.setHeader('Set-Cookie', axiosResponse.headers['set-cookie']);
+        }
         res.setHeader('Content-Type', contentType);
 
         if (contentType.includes('text/html')) {
@@ -117,8 +151,10 @@ const handleRequest = async (req, res) => {
             res.status(200).send(axiosResponse.data);
         }
     } catch (error) {
-        console.error('Proxy Error:', error.message);
-        res.status(500).send(`Error fetching the URL: ${error.message}`);
+        console.error('Proxy Error:', error.response ? `Status: ${error.response.status}` : error.message);
+        const statusCode = error.response ? error.response.status : 500;
+        const statusText = error.response ? error.response.statusText : 'Internal Server Error';
+        res.status(statusCode).send(`Error fetching the URL: ${statusText}`);
     }
 };
 
