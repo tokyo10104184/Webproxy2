@@ -12,6 +12,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // バックエンドのプロキシエンドポイントにリクエストを送信
         // URLをクエリパラメータとして渡す
-        contentFrame.src = `/proxy?url=${encodeURIComponent(url)}`;
+        contentFrame.src = `/api/proxy?url=${encodeURIComponent(url)}`;
     });
 });

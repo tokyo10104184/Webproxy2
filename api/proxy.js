@@ -2,9 +2,9 @@ const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const app = express();
-const port = 3000;
 
-app.use(express.static('public'));
+// The 'public' directory is served automatically by Vercel at the root.
+// The express.static middleware is not needed in the serverless function.
 
 // プロキシエンドポイント
 app.get('/proxy', async (req, res) => {
@@ -49,7 +49,5 @@ app.get('/proxy', async (req, res) => {
     }
 });
 
-
-app.listen(port, () => {
-  console.log(`Server listening at http://localhost:${port}`);
-});
+// Export the app for Vercel's serverless environment
+module.exports = app;
