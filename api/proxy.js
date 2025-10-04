@@ -91,7 +91,7 @@ const handleRequest = async (req, res) => {
         browser = await playwright.chromium.launch({
             args: chromium.args,
             executablePath: await chromium.executablePath(),
-            headless: chromium.headless,
+            headless: true, // chromium.headlessが文字列を返すことがあるため、booleanを直接指定
         });
 
         const context = await browser.newContext({
