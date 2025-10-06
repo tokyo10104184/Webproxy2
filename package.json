@@ -5,8 +5,7 @@
   "main": "api/proxy.js",
   "scripts": {
     "start": "node api/proxy.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "vercel-build": "yum install -y nss"
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
     "type": "git",
@@ -21,8 +20,7 @@
   },
   "homepage": "https://github.com/tokyo10104184/Webproxy2#readme",
   "dependencies": {
-    "cheerio": "^1.0.0-rc.12",
-    "playwright-core": "^1.44.1",
-    "@sparticuz/chromium": "^123.0.1"
+    "axios": "^1.7.2",
+    "cheerio": "^1.0.0-rc.12"
   }
 }

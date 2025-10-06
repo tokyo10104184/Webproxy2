@@ -1,5 +1,4 @@
-const playwright = require('playwright-core');
-const chromium = require('@sparticuz/chromium');
+const axios = require('axios');
 const cheerio = require('cheerio');
 const { URL, URLSearchParams } = require('url');
 
@@ -17,8 +16,8 @@ const resolveUrl = (path, base) => {
 };
 
 // HTMLを処理し、URLを書き換える関数
-const rewriteHtml = (htmlString, finalUrl) => {
-    const $ = cheerio.load(htmlString);
+const rewriteHtml = (htmlBuffer, finalUrl) => {
+    const $ = cheerio.load(htmlBuffer.toString('utf-8'));
 
     // ページ遷移のためのリンクをプロキシ経由に書き換える
     $('a[href]').each((i, elem) => {
@@ -33,7 +32,7 @@ const rewriteHtml = (htmlString, finalUrl) => {
     $('form').each((i, elem) => {
         const action = $(elem).attr('action') || '';
         const absoluteAction = resolveUrl(action, finalUrl.href);
-        $(elem).attr('action', '/api/proxy');
+        $(elem).attr('action', '/api/proxy'); // すべてのフォームはプロキシに送信
         $(elem).prepend(`<input type="hidden" name="proxy_target_url" value="${absoluteAction}">`);
     });
 
@@ -49,7 +48,7 @@ const rewriteHtml = (htmlString, finalUrl) => {
         });
     });
 
-    // srcset属性も絶対パスに
+    // srcset属性（レスポンシブ画像）も絶対パスに書き換える
     $('source, img').each((i, elem) => {
         const srcset = $(elem).attr('srcset');
         if (srcset) {
@@ -64,65 +63,90 @@ const rewriteHtml = (htmlString, finalUrl) => {
     return $.html();
 };
 
-
 // メインのリクエスト処理関数
 const handleRequest = async (req, res) => {
     let targetUrl;
+    let requestData;
     const method = req.method.toUpperCase();
 
     if (method === 'POST') {
         const { proxy_target_url, ...postData } = req.body || {};
         targetUrl = proxy_target_url;
-        const postParams = new URLSearchParams(postData).toString();
-        if (postParams) {
-            targetUrl += `?${postParams}`;
+        requestData = new URLSearchParams(postData).toString();
+    } else { // GET
+        const { proxy_target_url, ...getData } = req.query || {};
+        if (proxy_target_url) {
+            targetUrl = proxy_target_url;
+            const searchParams = new URLSearchParams(getData);
+            if (searchParams.toString()) {
+                targetUrl += `?${searchParams.toString()}`;
+            }
+        } else {
+            targetUrl = req.query.url;
         }
-    } else {
-        targetUrl = req.query.url;
     }
 
     if (!targetUrl) {
         return res.status(400).send('URL is required');
     }
 
-    let browser = null;
+    // --- ヘッダー転送ロジック ---
+    const forwardedHeaders = {
+        'user-agent': req.headers['user-agent'] || 'Mozilla/5.0 (iPad; CPU OS 13_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.1.1 Mobile/15E148 Safari/604.1',
+    };
+    const headersToForward = [
+        'accept',
+        'accept-language',
+        'accept-encoding',
+        'x-forwarded-for',
+        'cookie',
+    ];
+    headersToForward.forEach(headerName => {
+        if (req.headers[headerName]) {
+            forwardedHeaders[headerName] = req.headers[headerName];
+        }
+    });
     try {
-        // Vercel環境でChromiumを起動
-        browser = await playwright.chromium.launch({
-            args: chromium.args,
-            executablePath: await chromium.executablePath(),
-            headless: true, // chromium.headlessが文字列を返すことがあるため、booleanを直接指定
-        });
+        forwardedHeaders['referer'] = new URL(targetUrl).origin;
+    } catch (e) {
+        console.warn(`Could not set referer for invalid URL: ${targetUrl}`);
+    }
+    // --- ヘッダー転送ロジックここまで ---
 
-        const context = await browser.newContext({
-            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
-        });
-        const page = await context.newPage();
+    try {
+        const axiosConfig = {
+            method,
+            url: targetUrl,
+            headers: forwardedHeaders,
+            data: requestData,
+            responseType: 'arraybuffer',
+            maxRedirects: 5,
+            decompress: true,
+        };
+        if (method === 'POST') {
+            axiosConfig.headers['Content-Type'] = 'application/x-www-form-urlencoded';
+        }
 
-        const response = await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
-        const html = await page.content();
+        const axiosResponse = await axios(axiosConfig);
+        const finalUrl = new URL(axiosResponse.request.res.responseUrl || targetUrl);
+        const contentType = axiosResponse.headers['content-type'] || '';
 
-        const finalUrl = new URL(page.url());
-        const contentType = response.headers()['content-type'] || 'text/html';
-
+        if (axiosResponse.headers['set-cookie']) {
+            res.setHeader('Set-Cookie', axiosResponse.headers['set-cookie']);
+        }
         res.setHeader('Content-Type', contentType);
 
         if (contentType.includes('text/html')) {
-            const rewrittenHtml = rewriteHtml(html, finalUrl);
+            const rewrittenHtml = rewriteHtml(axiosResponse.data, finalUrl);
             res.status(200).send(rewrittenHtml);
         } else {
-            // HTML以外はそのまま返す (将来的には対応が必要)
-            const buffer = await response.body();
-            res.status(200).send(buffer);
+            res.status(200).send(axiosResponse.data);
         }
-
     } catch (error) {
-        console.error('Proxy Error:', error.message);
-        res.status(500).send(`Error fetching the URL with Playwright: ${error.message}`);
-    } finally {
-        if (browser) {
-            await browser.close();
-        }
+        console.error('Proxy Error:', error.response ? `Status: ${error.response.status}` : error.message);
+        const statusCode = error.response ? error.response.status : 500;
+        const statusText = error.response ? error.response.statusText : 'Internal Server Error';
+        res.status(statusCode).send(`Error fetching the URL: ${statusText}`);
     }
 };
 
