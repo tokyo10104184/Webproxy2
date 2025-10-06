@@ -23,7 +23,9 @@ const toProxyUrl = (url, base) => {
     }
 };
 
-app.use(`${PROXY_ROOT}/:url`, proxy(
+// Vercelは`/api/proxy`へのリクエストをこの関数にルーティングし、
+// Expressアプリはパスの残りの部分（例：`/ENCODED_URL`）を受け取ります。
+app.use('/:url', proxy(
     (req) => {
         const targetUrl = b64decode(req.params.url);
         if (!targetUrl) {
