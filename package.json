@@ -20,8 +20,7 @@
   },
   "homepage": "https://github.com/tokyo10104184/Webproxy2#readme",
   "dependencies": {
-    "express": "^4.19.2",
-    "express-http-proxy": "^2.0.0",
-    "cors": "^2.8.5"
+    "axios": "^1.7.2",
+    "cheerio": "^1.0.0-rc.12"
   }
 }
