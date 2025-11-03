@@ -44,6 +44,15 @@ button {
     cursor: pointer;
 }
 
+#copy-url-button, #clear-all-button {
+    padding: 8px 10px;
+    background-color: #6c757d;
+}
+
+#copy-url-button:hover, #clear-all-button:hover {
+    background-color: #5a6268;
+}
+
 button:hover {
     background-color: #0056b3;
 }
